@@ -1,54 +1,97 @@
-import os
 import subprocess
 import sys
+import psycopg2
+from configparser import ConfigParser
 
 
-def install_requirements():
+def install_dependencies():
     """Установка зависимостей"""
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-
-
-def check_postgres():
-    """Проверка установлен ли PostgreSQL"""
+    print("Установка зависимостей...")
     try:
-        subprocess.run(["psql", "--version"], capture_output=True, check=True)
-        return True
-    except:
-        return False
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        print("✅ Зависимости установлены успешно!")
+    except subprocess.CalledProcessError:
+        print("❌ Ошибка установки зависимостей")
 
 
 def create_database():
-    """Создание БД через командную строку"""
+    """Создание базы данных и таблиц"""
+    print("Создание базы данных...")
     try:
-        # Создаем базу данных
-        subprocess.run([
-            "psql", "-U", "postgres",
-            "-c", "CREATE DATABASE ai_ddos_detection ENCODING 'UTF8';"
-        ], check=True)
+        # Подключаемся к стандартной базе postgres
+        conn = psycopg2.connect(
+            host="localhost",
+            database="postgres",
+            user="postgres",
+            password="12345678",
+            port="5432"
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
 
-        # Запускаем SQL скрипт
-        subprocess.run([
-            "psql", "-U", "postgres", "-d", "ai_ddos_detection",
-            "-f", "database/schema.sql"
-        ], check=True)
+        # Проверяем существование базы
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = 'ai_ddos_detection'")
+        exists = cur.fetchone()
 
-        print("✅ База данных создана успешно!")
-        return True
+        if not exists:
+            # Создаем базу данных
+            cur.execute("CREATE DATABASE ai_ddos_detection")
+            print("✅ База данных 'ai_ddos_detection' создана")
+        else:
+            print("✅ База данных 'ai_ddos_detection' уже существует")
 
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Ошибка при создании БД: {e}")
-        return False
+        # Подключаемся к новой базе
+        cur.close()
+        conn.close()
+
+        conn = psycopg2.connect(
+            host="localhost",
+            database="ai_ddos_detection",
+            user="postgres",
+            password="12345678",
+            port="5432"
+        )
+        cur = conn.cursor()
+
+        # Создаем таблицу
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_models (
+                model_id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                version VARCHAR(50),
+                is_production BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Добавляем тестовые данные
+        cur.execute("""
+            INSERT INTO ai_models (name, version, is_production) 
+            VALUES 
+                ('DDoS Detection Model v1', '1.0', TRUE),
+                ('Traffic Analysis AI', '2.1', FALSE),
+                ('Security Monitor', '1.5', TRUE)
+            ON CONFLICT DO NOTHING
+        """)
+
+        conn.commit()
+        print("✅ Таблица 'ai_models' создана с тестовыми данными")
+
+        cur.close()
+        conn.close()
+
+    except psycopg2.OperationalError as e:
+        print(f"❌ Ошибка подключения к PostgreSQL: {e}")
+        print("\nУбедитесь, что:")
+        print("1. PostgreSQL запущен")
+        print("2. Пароль правильный (12345678)")
+        print("3. Порт 5432 доступен")
+    except Exception as e:
+        print(f"❌ Ошибка при создании базы данных: {e}")
 
 
 if __name__ == "__main__":
-    print("Установка зависимостей...")
-    install_requirements()
-
-    print("Проверка PostgreSQL...")
-    if not check_postgres():
-        print("❌ PostgreSQL не установлен. Установите его с официального сайта")
-        sys.exit(1)
-
-    print("Создание базы данных...")
+    install_dependencies()
     create_database()
-    print("✅ Настройка завершена! Запустите: python src/main.py")
+    print("\nУстановка завершена! Запустите main.py")
+    input("Нажмите Enter для выхода...")

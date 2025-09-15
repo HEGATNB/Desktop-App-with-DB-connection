@@ -11,3 +11,6 @@
 1. **Проверьте что PostgreSQL запущен** (в службах Windows)
 2. **Измените пароль** в src/main.py на ваш пароль от PostgreSQL
 3. **Создайте БД вручную** в pgAdmin: `ai_ddos_detection`
+
+## Для экспорта данных (когда изменили базу):
+python database_sync.py (bash)

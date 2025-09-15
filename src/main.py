@@ -14,22 +14,50 @@ class SimpleApp:
         self.load_data()
 
     def connect_db(self):
-        """Простое подключение к БД"""
+        """Простое подключение к БД с улучшенной диагностикой"""
         try:
+            conn = psycopg2.connect(
+                host="localhost",
+                database="postgres",  # Сначала подключимся к стандартной базе
+                user="postgres",
+                password="12345678",
+                port="5432"
+            )
+
+            # Проверим существование нужной базы
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = 'ai_ddos_detection'")
+                if not cur.fetchone():
+                    messagebox.showwarning("Внимание",
+                                           "База данных 'ai_ddos_detection' не существует.\n"
+                                           "Создайте её командой: CREATE DATABASE ai_ddos_detection;")
+                    return None
+
+            # Переподключаемся к нужной базе
+            conn.close()
             return psycopg2.connect(
                 host="localhost",
                 database="ai_ddos_detection",
                 user="postgres",
-                password="12345678",  # Пароль который задавали при установке
+                password="12345678",
                 port="5432"
             )
+
+        except psycopg2.OperationalError as e:
+            error_msg = str(e)
+            if "password authentication failed" in error_msg:
+                messagebox.showerror("Ошибка",
+                                     "Неверный пароль PostgreSQL.\n"
+                                     "Проверьте пароль или сбросьте его через pgAdmin.")
+            elif "connection refused" in error_msg.lower():
+                messagebox.showerror("Ошибка",
+                                     "PostgreSQL не запущен!\n"
+                                     "Запустите службу PostgreSQL через services.msc")
+            else:
+                messagebox.showerror("Ошибка", f"Ошибка подключения: {e}")
+            return None
         except Exception as e:
-            messagebox.showerror("Ошибка",
-                                 f"Не удалось подключиться к БД:\n"
-                                 f"1. Убедитесь что PostgreSQL запущен\n"
-                                 f"2. Пароль: 12345678\n"
-                                 f"3. База ai_ddos_detection создана\n\n"
-                                 f"Ошибка: {e}")
+            messagebox.showerror("Ошибка", f"Неизвестная ошибка: {e}")
             return None
 
     def create_widgets(self):
