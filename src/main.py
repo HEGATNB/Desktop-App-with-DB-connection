@@ -5,8 +5,6 @@ from tkinter import *
 import datetime
 import os
 from PIL import Image, ImageTk
-import logging
-from logging_config import setup_logging
 
 
 class SimpleApp:
@@ -14,12 +12,6 @@ class SimpleApp:
         self.root = root
         self.root.title("AI Monitor")
         self.root.geometry("600x400")
-
-        # Настройка логирования
-        self.logger = setup_logging()
-        self.logger.info("=" * 50)
-        self.logger.info("Запуск приложения AI Monitor")
-        self.logger.info("=" * 50)
 
         # Настройка стиля для ВСЕХ ttk виджетов
         self.setup_global_style()
@@ -34,7 +26,6 @@ class SimpleApp:
                         foreground="#004D40",
                         padding=8,
                         background="#B2DFDB")
-
         style.configure("Treeview",
                         font=("helvetica", 11),
                         rowheight=25)
@@ -49,26 +40,7 @@ class SimpleApp:
                         foreground="#004D40")
 
     def connect_db(self):
-        self.logger.info("Попытка подключения к базе данных...")
         try:
-            conn = psycopg2.connect(
-                host="localhost",
-                database="postgres",
-                user="postgres",
-                password="12345678",
-                port="5432"
-            )
-
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM pg_database WHERE datname = 'ai_ddos_detection'")
-                if not cur.fetchone():
-                    self.logger.warning("База данных 'ai_ddos_detection' не существует")
-                    messagebox.showwarning("Внимание",
-                                           "База данных 'ai_ddos_detection' не существует.\n"
-                                           "Создайте её командой: CREATE DATABASE ai_ddos_detection;")
-                    return None
-
-            conn.close()
             self.conn = psycopg2.connect(
                 host="localhost",
                 database="ai_ddos_detection",
@@ -76,41 +48,182 @@ class SimpleApp:
                 password="12345678",
                 port="5432"
             )
-            self.logger.info("Успешное подключение к базе данных")
-            messagebox.showinfo("", "База данных успешно подключена")
+            messagebox.showinfo("Успех", "База данных успешно подключена")
             return self.conn
 
         except psycopg2.OperationalError as e:
             error_msg = str(e)
             if "password authentication failed" in error_msg:
-                self.logger.error("Ошибка аутентификации: неверный пароль PostgreSQL")
                 messagebox.showerror("Ошибка",
                                      "Неверный пароль PostgreSQL.\n""Проверьте пароль или сбросьте его через pgAdmin.")
             elif "connection refused" in error_msg.lower():
-                self.logger.error("Ошибка подключения: PostgreSQL не запущен")
                 messagebox.showerror("Ошибка",
                                      "PostgreSQL не запущен!\n""Запустите службу PostgreSQL через services.msc")
+            elif "database" in error_msg.lower():
+                try:
+                    # Пытаемся создать базу данных
+                    conn_temp = psycopg2.connect(
+                        host="localhost",
+                        database="postgres",
+                        user="postgres",
+                        password="12345678",
+                        port="5432"
+                    )
+                    conn_temp.autocommit = True
+                    cursor = conn_temp.cursor()
+                    cursor.execute("CREATE DATABASE ai_ddos_detection")
+                    conn_temp.close()
+
+                    # Подключаемся к новой базе
+                    self.conn = psycopg2.connect(
+                        host="localhost",
+                        database="ai_ddos_detection",
+                        user="postgres",
+                        password="12345678",
+                        port="5432"
+                    )
+                    messagebox.showinfo("Успех", "База данных создана и подключена")
+                    return self.conn
+                except Exception as create_error:
+                    messagebox.showerror("Ошибка", f"Не удалось создать базу данных: {create_error}")
             else:
-                self.logger.error(f"Ошибка подключения к БД: {e}")
                 messagebox.showerror("Ошибка", f"Ошибка подключения: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Неизвестная ошибка при подключении: {e}")
             messagebox.showerror("Ошибка", f"Неизвестная ошибка: {e}")
             return None
 
-    def check_cell_value(self, row_index, column_name):
-        items = self.tree.get_children()
-        if row_index < len(items):
-            item = items[row_index]
-            values = self.tree.item(item, 'values')
-            # Определяем индекс колонки
-            columns = ['ID', 'Name', 'Description', 'Version', 'Framework',
-                       'IsProduction', 'Production', 'CreatedAt', 'UpdatedAt', 'AttackType', 'ActualVersions']
-            col_index = columns.index(column_name)
-            cell_value = values[col_index]
-            return cell_value
+    def cleanup_existing_schema(self):
+        """Очищает существующую схему и создает простую таблицу"""
+        if not self.conn:
+            return False
 
+        try:
+            cursor = self.conn.cursor()
+
+            # Удаляем все таблицы в правильном порядке (из-за FOREIGN KEY)
+            cursor.execute("""
+                DROP TABLE IF EXISTS 
+                    ai_models.model_dependencies,
+                    ai_models.model_metrics,
+                    ai_models.ai_models,
+                    ai_models.environments,
+                    ai_models.frameworks CASCADE
+            """)
+
+            # Удаляем ENUM тип если существует
+            cursor.execute("DROP TYPE IF EXISTS attacks CASCADE")
+
+            self.conn.commit()
+            messagebox.showinfo("Успех", "Существующая схема очищена")
+            return True
+
+        except psycopg2.Error as e:
+            messagebox.showerror("Ошибка", f"Ошибка при очистке схемы: {e}")
+            self.conn.rollback()
+            return False
+
+    def create_simple_table(self):
+        """Создает простую таблицу без FOREIGN KEY"""
+        if not self.conn:
+            messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
+            return False
+
+        try:
+            cursor = self.conn.cursor()
+
+            # Создаем схему если не существует
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS ai_models")
+
+            # Создаем простой ENUM тип
+            cursor.execute("""
+                DO $$ 
+                BEGIN 
+                    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'attacks') THEN
+                        CREATE TYPE attacks AS ENUM ('DDoS', 'Malware', 'IoT');
+                    END IF;
+                END $$;
+            """)
+
+            # Создаем простую таблицу без FOREIGN KEY
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_models.ai_models (
+                    model_id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    framework TEXT NOT NULL,
+                    is_production BOOLEAN NOT NULL DEFAULT FALSE,
+                    production TEXT,
+                    created_at DATE,
+                    updated_at DATE,
+                    attack_type attacks,
+                    actual_versions TEXT[]
+                )
+            """)
+
+            self.conn.commit()
+            messagebox.showinfo("Успех", "Простая таблица успешно создана")
+            return True
+
+        except psycopg2.Error as e:
+            messagebox.showerror("Ошибка", f"Ошибка при создании таблицы: {e}")
+            self.conn.rollback()
+            return False
+
+    def create_table_and_schema(self):
+        """Создает все необходимые объекты базы данных"""
+        if not self.conn:
+            if not self.connect_db():
+                return
+
+        try:
+            # Сначала очищаем существующую схему
+            if messagebox.askyesno("Очистка", "Очистить существующую схему и создать простую таблицу?"):
+                if self.cleanup_existing_schema():
+                    if self.create_simple_table():
+                        messagebox.showinfo("Успех", "Все объекты базы данных успешно созданы!")
+                    else:
+                        messagebox.showerror("Ошибка", "Не удалось создать таблицу")
+                else:
+                    messagebox.showerror("Ошибка", "Не удалось очистить схему")
+            else:
+                # Просто создаем простую таблицу без очистки
+                if self.create_simple_table():
+                    messagebox.showinfo("Успех", "Таблица успешно создана")
+                else:
+                    messagebox.showerror("Ошибка", "Не удалось создать таблицу")
+
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка при создании объектов БД: {e}")
+
+    def check_table_exists(self):
+        """Проверяет существование таблицы ai_models в любой схеме"""
+        if not self.conn:
+            return False
+
+        try:
+            with self.conn.cursor() as cur:
+                # Проверяем существование таблицы в разных схемах
+                for schema in ['ai_models', 'public']:
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables 
+                            WHERE table_schema = %s AND table_name = 'ai_models'
+                        )
+                    """, (schema,))
+                    if cur.fetchone()[0]:
+                        return True
+                return False
+        except Exception as e:
+            print(f"Ошибка при проверке таблицы: {e}")
+            return False
+
+    def get_enum_values(self):
+        # Всегда возвращаем правильные значения enum
+        return ['DDoS', 'Malware', 'IoT']
+
+    # Остальные методы остаются без изменений
     def create_combobox_for_filters(self, parent_frame):
         types = ["Без сортировки", "ID", "Attack Type", "CreatedAt", "UpdatedAt"]
         combobox = ttk.Combobox(parent_frame, values=types, state="readonly")
@@ -119,7 +232,6 @@ class SimpleApp:
 
         def on_filter_change(event):
             selected = combobox.get()
-            self.logger.info(f"Применена сортировка: {selected}")
             if selected == "CreatedAt":
                 self.sort_by_creation()
             elif selected == "UpdatedAt":
@@ -137,7 +249,6 @@ class SimpleApp:
     def sort_by_id(self):
         if hasattr(self, 'edit_tree') and self.edit_tree:
             items = [(self.edit_tree.set(item, 'ID'), item) for item in self.edit_tree.get_children('')]
-            # Сортируем по числовому значению ID
             items.sort(key=lambda x: int(x[0]) if x[0].isdigit() else float('inf'))
             for index, (val, item) in enumerate(items):
                 self.edit_tree.move(item, '', index)
@@ -253,43 +364,34 @@ class SimpleApp:
             canvas.after(100, lambda: resize_image())
 
         except Exception as e:
-            self.logger.error(f"Ошибка загрузки изображения: {e}")
+            print(f"Ошибка загрузки изображения: {e}")
             # Создаем простой canvas без изображения
             canvas = Canvas(self.root, bg="#E0F2F1", width=600, height=400)
             canvas.pack(fill="both", expand=True)
 
-        ttk.Button(canvas, text="Создать схему и таблицы", command=self.create_table_and_schema).place(relx=0.5,rely=0.3,anchor="center")
+        ttk.Button(canvas, text="Создать схему и таблицы", command=self.create_table_and_schema).place(relx=0.5,
+                                                                                                       rely=0.3,
+                                                                                                       anchor="center")
         ttk.Button(canvas, text="Внести данные", command=self.edit_data).place(relx=0.5, rely=0.5, anchor="center")
         ttk.Button(canvas, text="Показать данные", command=self.open_table).place(relx=0.5, rely=0.7, anchor="center")
 
-    def create_schema(self):
-        self.logger.info("Попытка создания схемы 'ai_models'")
-        if not self.conn:
-            self.logger.error("Не удалось создать схему: нет подключения к БД")
-            messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
-            return False
-
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("CREATE SCHEMA IF NOT EXISTS ai_models")
-            self.conn.commit()
-            self.logger.info("Схема 'ai_models' успешно создана")
-            messagebox.showinfo("Успех", "Схема успешно создана")
-            return True
-        except psycopg2.Error as e:
-            self.logger.error(f"Ошибка при создании схемы: {e}")
-            messagebox.showerror("Ошибка", f"Ошибка при создании схемы: {e}")
-            return False
-
     def edit_data(self, parent_window=None):
-        self.logger.info("Открытие окна редактирования данных")
         if parent_window is None:
             parent_window = self.root
 
         if not self.conn:
-            self.logger.error("Не удалось открыть редактор: нет подключения к БД")
             messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
             return
+
+        # Проверяем существование таблицы перед открытием окна редактирования
+        if not self.check_table_exists():
+            if messagebox.askyesno("Таблица не найдена",
+                                   "Таблица ai_models не существует. Хотите создать её сейчас?"):
+                self.create_table_and_schema()
+                if not self.check_table_exists():
+                    return
+            else:
+                return
 
         edit_window = Toplevel(parent_window)
         edit_window.title("Редактирование данных")
@@ -365,13 +467,18 @@ class SimpleApp:
             if not self.conn:
                 messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
                 return
+
+            # Проверяем существование таблицы
+            if not self.check_table_exists():
+                messagebox.showinfo("Информация", "Таблица не существует. Добавьте новые строки для создания таблицы.")
+                return
+
             for item in treeview.get_children():
                 treeview.delete(item)
             with self.conn.cursor() as cur:
                 rows = self.try_fetch_from_schemas(cur, ['ai_models', 'public'])
 
                 if rows is not None:
-                    self.logger.info(f"Загружено {len(rows)} записей из базы данных")
                     for i, row in enumerate(rows):
                         formatted_row = []
                         for cell in row:
@@ -380,34 +487,15 @@ class SimpleApp:
                             else:
                                 formatted_row.append(str(cell) if cell is not None else '')
 
-                        tag = 'evenrow' if i % 2 == 0 else ('oddrow' if treeview == self.edit_tree else '')
+                        tag = 'evenrow' if i % 2 == 0 else (
+                            'oddrow' if hasattr(self, 'edit_tree') and treeview == self.edit_tree else '')
                         treeview.insert('', 'end', values=formatted_row, tags=(tag,))
                 else:
-                    self.logger.warning("Таблица пуста или не существует")
-                    messagebox.showinfo("Информация", "Таблица пуста или не существует. Добавьте новые строки.")
+                    # Таблица существует, но пуста
+                    messagebox.showinfo("Информация", "Таблица пуста. Добавьте новые строки.")
 
         except Exception as e:
-            self.logger.error(f"Ошибка при загрузке данных: {e}")
             messagebox.showerror("Ошибка", f"Ошибка при загрузке данных: {e}")
-
-    def get_enum_values(self):
-        if not self.conn:
-            return ['DDoS', 'Malware', 'IoT']
-
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("""
-                    SELECT enumlabel 
-                    FROM pg_enum 
-                    JOIN pg_type ON pg_enum.enumtypid = pg_type.oid 
-                    WHERE pg_type.typname = 'attacks'
-                    ORDER BY enumsortorder
-                """)
-                result = cur.fetchall()
-                return [row[0] for row in result] if result else ['DDoS', 'Malware', 'IoT']
-        except Exception as e:
-            self.logger.warning(f"Ошибка при получении enum значений: {e}")
-            return ['DDoS', 'Malware', 'IoT']
 
     def on_double_click(self, event):
         item = self.edit_tree.identify('item', event.x, event.y)
@@ -433,7 +521,7 @@ class SimpleApp:
             self.create_entry_for_cell(item, column_index, bbox, current_value)
 
     def create_combobox_for_enum(self, item, column_index, bbox, current_value):
-        enum_values = self.get_enum_values()
+        enum_values = self.get_enum_values()  # Используем правильные значения
 
         combo = ttk.Combobox(self.edit_tree, values=enum_values, state="readonly")
         combo.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
@@ -489,13 +577,13 @@ class SimpleApp:
             if array_text:
                 try:
                     elements = [elem.strip() for elem in array_text.split(',')]
-                    versions = [elem for elem in elements if elem]
+                    versions_array = [elem for elem in elements if elem]
 
                     # ПРОВЕРКА UNIQUE ДЛЯ ВЕРСИЙ
-                    if len(versions) != len(set(versions)):
+                    if len(versions_array) != len(set(versions_array)):
                         duplicates = []
                         seen = set()
-                        for version in versions:
+                        for version in versions_array:
                             if version in seen and version not in duplicates:
                                 duplicates.append(version)
                             seen.add(version)
@@ -503,7 +591,7 @@ class SimpleApp:
                                                f"Найдены дублирующиеся версии: {', '.join(duplicates)}\n"
                                                f"Уберите дубликаты перед сохранением.")
                         return
-                    array_str = "{" + ",".join(versions) + "}"
+                    array_str = "{" + ",".join(versions_array) + "}"
                     current_values = list(self.edit_tree.item(item, 'values'))
                     current_values[column_index] = array_str
                     self.edit_tree.item(item, values=current_values)
@@ -565,7 +653,6 @@ class SimpleApp:
         entry.bind('<FocusOut>', save_edit)
 
     def add_new_row(self):
-        self.logger.info("Добавление новой строки в таблицу")
         new_values = ['NEW'] + [''] * 10
         new_values[1] = 'Новая модель'
         new_values[2] = 'Описание модели'
@@ -592,16 +679,42 @@ class SimpleApp:
             messagebox.showwarning("Внимание", "Выберите строку для удаления")
             return
         if messagebox.askyesno("Подтверждение", "Удалить выбранную строку?"):
+            # Собираем ID строк для удаления из БД
+            ids_to_delete = []
             for item in selected:
-                self.logger.info(f"Удаление строки с ID: {self.edit_tree.item(item, 'values')[0]}")
+                values = self.edit_tree.item(item, 'values')
+                if values and values[0] != 'NEW' and values[0].isdigit():
+                    ids_to_delete.append(int(values[0]))
+
+            # Удаляем из БД
+            if ids_to_delete:
+                try:
+                    current_schema = self.get_current_schema()
+                    if current_schema:
+                        with self.conn.cursor() as cursor:
+                            placeholders = ','.join(['%s'] * len(ids_to_delete))
+                            cursor.execute(f"DELETE FROM {current_schema}.ai_models WHERE model_id IN ({placeholders})",
+                                           tuple(ids_to_delete))
+                            self.conn.commit()
+                except Exception as e:
+                    messagebox.showerror("Ошибка", f"Ошибка при удалении из БД: {e}")
+                    self.conn.rollback()
+
+            # Удаляем из Treeview
+            for item in selected:
                 self.edit_tree.delete(item)
 
     def save_changes(self):
-        self.logger.info("Начало сохранения изменений в базе данных")
         try:
             if not self.conn:
                 messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
                 return
+
+            # Проверяем существование таблицы, если нет - создаем
+            if not self.check_table_exists():
+                if not self.create_simple_table():
+                    messagebox.showerror("Ошибка", "Не удалось создать таблицу")
+                    return
 
             current_schema = self.get_current_schema()
             if not current_schema:
@@ -631,6 +744,11 @@ class SimpleApp:
                             if not name or not description or not version or not framework:
                                 raise ValueError(
                                     "Поля Name, Description, Version, Framework обязательны для заполнения")
+
+                            # Если ID был изменен вручную с 'NEW' на число, но строка еще не сохранена в БД
+                            if model_id != 'NEW' and not model_id.isdigit():
+                                raise ValueError("ID должен быть числом или 'NEW' для новых строк")
+
                             if is_production.lower() in ('true', '1', 'yes', 't', 'да'):
                                 is_production_bool = True
                             elif is_production.lower() in ('false', '0', 'no', 'f', 'нет', ''):
@@ -671,7 +789,7 @@ class SimpleApp:
                                     raise ValueError(
                                         f"Неверный формат даты UpdatedAt: {updated_at}. Используйте YYYY-MM-DD")
 
-                            if model_id == 'NEW' or not model_id:
+                            if model_id == 'NEW' or not model_id.isdigit():
                                 # ПОДГОТОВЛЕННЫЙ ЗАПРОС ДЛЯ ВСТАВКИ
                                 insert_query = f"""
                                     INSERT INTO {current_schema}.ai_models 
@@ -694,7 +812,6 @@ class SimpleApp:
                                 )
 
                                 cursor.execute(insert_query, insert_params)
-                                self.logger.info(f"DML INSERT: Добавлена новая запись: {name}")
 
                                 # Получаем новый ID и обновляем отображение
                                 new_id = cursor.fetchone()[0]
@@ -704,50 +821,62 @@ class SimpleApp:
                                 success_count += 1
 
                             else:
-                                # ПОДГОТОВЛЕННЫЙ ЗАПРОС ДЛЯ ОБНОВЛЕНИЯ
-                                update_query = f"""
-                                    UPDATE {current_schema}.ai_models 
-                                    SET name = %s, description = %s, version = %s, framework = %s, 
-                                        is_production = %s, production = %s, created_at = %s, 
-                                        updated_at = %s, attack_type = %s, actual_versions = %s
-                                    WHERE model_id = %s
-                                """
-                                update_params = (
-                                    name.strip(),
-                                    description.strip(),
-                                    version.strip(),
-                                    framework.strip(),
-                                    is_production_bool,
-                                    production.strip() if production else None,
-                                    created_at if created_at else None,
-                                    updated_at if updated_at else None,
-                                    attack_type if attack_type else None,
-                                    versions_array,  # Массив версий
-                                    int(model_id)
-                                )
+                                # Проверяем существование записи с таким ID
+                                cursor.execute(f"SELECT 1 FROM {current_schema}.ai_models WHERE model_id = %s",
+                                               (int(model_id),))
+                                if not cursor.fetchone():
+                                    # Если записи с таким ID нет, вставляем как новую
+                                    insert_query = f"""
+                                        INSERT INTO {current_schema}.ai_models 
+                                        (model_id, name, description, version, framework, is_production, production, 
+                                         created_at, updated_at, attack_type, actual_versions)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    """
+                                    insert_params = (
+                                        int(model_id),
+                                        name.strip(),
+                                        description.strip(),
+                                        version.strip(),
+                                        framework.strip(),
+                                        is_production_bool,
+                                        production.strip() if production else None,
+                                        created_at if created_at else None,
+                                        updated_at if updated_at else None,
+                                        attack_type if attack_type else None,
+                                        versions_array  # Массив версий
+                                    )
+                                    cursor.execute(insert_query, insert_params)
+                                    success_count += 1
+                                else:
+                                    # ПОДГОТОВЛЕННЫЙ ЗАПРОС ДЛЯ ОБНОВЛЕНИЯ
+                                    update_query = f"""
+                                        UPDATE {current_schema}.ai_models 
+                                        SET name = %s, description = %s, version = %s, framework = %s, 
+                                            is_production = %s, production = %s, created_at = %s, 
+                                            updated_at = %s, attack_type = %s, actual_versions = %s
+                                        WHERE model_id = %s
+                                    """
+                                    update_params = (
+                                        name.strip(),
+                                        description.strip(),
+                                        version.strip(),
+                                        framework.strip(),
+                                        is_production_bool,
+                                        production.strip() if production else None,
+                                        created_at if created_at else None,
+                                        updated_at if updated_at else None,
+                                        attack_type if attack_type else None,
+                                        versions_array,  # Массив версий
+                                        int(model_id)
+                                    )
 
-                                cursor.execute(update_query, update_params)
-                                self.logger.info(f"DML UPDATE: Обновлена запись ID {model_id}: {name}")
-                                success_count += 1
+                                    cursor.execute(update_query, update_params)
+                                    success_count += 1
 
-                        except psycopg2.Error as e:
-                            if 'unique constraint' in str(e).lower():
-                                self.logger.error(f"Ошибка ограничения уникальности для записи {model_id}: {e}")
-                                errors.append(f"Строка {model_id}: Нарушение уникальности данных")
-                            elif 'foreign key' in str(e).lower():
-                                self.logger.error(f"Ошибка внешнего ключа для записи {model_id}: {e}")
-                                errors.append(f"Строка {model_id}: Ошибка ссылочной целостности")
-                            elif 'check constraint' in str(e).lower():
-                                self.logger.error(f"Ошибка проверочного ограничения для записи {model_id}: {e}")
-                                errors.append(f"Строка {model_id}: Нарушение проверочного ограничения")
-                            else:
-                                self.logger.error(f"Ошибка БД для записи {model_id}: {e}")
-                                errors.append(f"Строка {model_id}: Ошибка базы данных: {e}")
-                            error_count += 1
                         except Exception as e:
                             error_count += 1
-                            self.logger.error(f"Ошибка валидации для записи {model_id}: {e}")
                             errors.append(f"Строка {model_id if model_id != 'NEW' else 'NEW'}: {str(e)}")
+                            # Продолжаем обработку других строк, но транзакция будет откачена при выходе
 
             # После выхода из блока with транзакция автоматически коммитится или откатывается
             if error_count > 0:
@@ -756,54 +885,21 @@ class SimpleApp:
                     errors[:5])
                 if len(errors) > 5:
                     error_msg += f"\n... и еще {len(errors) - 5} ошибок"
-                self.logger.error(f"Сохранение завершено с ошибками: {error_count} ошибок")
                 messagebox.showerror("Ошибки сохранения", error_msg)
             else:
                 # Если ошибок не было, транзакция автоматически закоммитилась
-                self.logger.info(f"Успешно сохранено {success_count} записей")
                 messagebox.showinfo("Успех", f"Все {success_count} строк успешно сохранены")
 
             self.load_data_for_editing()
 
         except psycopg2.Error as e:
             # Ошибка на уровне транзакции
-            self.logger.error(f"Ошибка транзакции при сохранении данных: {e}")
             messagebox.showerror("Ошибка транзакции", f"Ошибка при сохранении данных: {e}")
         except Exception as e:
             # Другие ошибки
-            self.logger.error(f"Критическая ошибка при сохранении данных: {e}")
             messagebox.showerror("Ошибка", f"Критическая ошибка при сохранении данных: {e}")
 
-    def create_enum_types(self):
-        self.logger.info("Попытка создания ENUM типа 'attacks'")
-        if not self.conn:
-            messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
-            return False
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = 'attacks')")
-            if cursor.fetchone()[0]:
-                self.logger.info("ENUM тип 'attacks' уже существует")
-                messagebox.showinfo(" ", "enum тип создан или уже существует")
-                return True
-
-            cursor.execute("CREATE TYPE attacks AS ENUM ('DDoS', 'Malware', 'IoT')")
-            self.conn.commit()
-            self.logger.info("DDL: Создан ENUM тип 'attacks'")
-            messagebox.showinfo("Успех", "Созданы пользовательские типы ENUM")
-            return True
-        except psycopg2.Error as e:
-            if 'already exists' in str(e):
-                self.logger.info("ENUM тип 'attacks' уже существует")
-                messagebox.showinfo("Тип ENUM уже существует")
-                return True
-            self.logger.error(f"Ошибка при создании ENUM типа: {e}")
-            messagebox.showerror("Ошибка", f"Ошибка при создании пользовательских типов: {e}")
-            self.conn.rollback()
-            return False
-
     def open_table(self):
-        self.logger.info("Открытие окна просмотра данных")
         table = tk.Toplevel(self.root)
         table.title("Просмотр данных")
         table.geometry("1600x600")
@@ -847,91 +943,6 @@ class SimpleApp:
         ttk.Button(button_frame, text="Закрыть", command=table.destroy).pack(side='right', padx=5)
 
         self.load_table_data()
-
-    def create_table(self):
-        self.logger.info("Попытка создания таблицы 'ai_models'")
-        if not self.conn:
-            self.logger.error("Не удалось создать таблицу: нет подключения к БД")
-            messagebox.showerror("Ошибка", "Сначала подключитесь к базе данных")
-            return False
-
-        try:
-            cursor = self.conn.cursor()
-
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_schema = 'ai_models' 
-                    AND table_name = 'ai_models'
-                )
-            """)
-            if cursor.fetchone()[0]:
-                cursor.execute("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_schema = 'ai_models' 
-                    AND table_name = 'ai_models' 
-                    AND column_name = 'actual_versions'
-                """)
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        ALTER TABLE ai_models.ai_models 
-                        ADD COLUMN actual_versions TEXT[]
-                    """)
-                    self.conn.commit()
-                    self.logger.info("DDL: Добавлен столбец 'actual_versions' в таблицу 'ai_models'")
-                    messagebox.showinfo("Успех", "Столбец actual_versions добавлен в существующую таблицу")
-                else:
-                    self.logger.info("Таблица 'ai_models' уже существует")
-                return True
-
-            cursor.execute("""
-                CREATE TABLE ai_models.ai_models (
-                    model_id SERIAL NOT NULL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    framework TEXT NOT NULL,
-                    is_production BOOLEAN NOT NULL,
-                    production TEXT,
-                    created_at DATE,
-                    updated_at DATE,
-                    attack_type attacks,
-                    actual_versions TEXT[]  -- НОВЫЙ СТОЛБЕЦ С МАССИВОМ ВЕРСИЙ
-                )
-            """)
-            self.conn.commit()
-            self.logger.info("DDL: Создана таблица 'ai_models' в схеме 'ai_models'")
-            messagebox.showinfo("Успех", "Таблица успешно создана")
-            return True
-        except psycopg2.Error as e:
-            self.logger.error(f"Ошибка при создании таблицы: {e}")
-            messagebox.showerror("Ошибка", f"Ошибка при создании таблицы: {e}")
-            self.conn.rollback()
-            return False
-
-    def create_table_and_schema(self):
-        self.logger.info("Открытие окна создания таблиц и схем")
-        table_create = Toplevel(self.root)
-        table_create.title("Создание таблицы")
-        table_create.geometry("600x400")
-
-        table_create.transient(self.root)
-        table_create.grab_set()
-
-        ttk.Button(table_create, text="Подключиться к БД", command=self.connect_db).pack(pady=10)
-        ttk.Button(table_create, text="Создать схему в БД", command=self.create_schema).pack(pady=10)
-        ttk.Button(table_create, text="Создать пользовательские типы ENUM", command=self.create_enum_types).pack(
-            pady=10)
-        ttk.Button(table_create, text="Создать таблицы", command=self.create_table).pack(pady=10)
-        ttk.Button(table_create, text="Редактировать данные", command=lambda: self.edit_data(table_create)).pack(
-            pady=10)
-        ttk.Button(table_create, text="Закрыть", command=table_create.destroy).pack(side='left', padx=20)
-        ttk.Button(table_create, text="Обновить", command=self.connect_db).pack(side='right', padx=20)
-
-    def load_data(self):
-        if hasattr(self, 'tree'):
-            self.load_table_data()
 
 
 if __name__ == "__main__":
